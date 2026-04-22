@@ -118,59 +118,64 @@ func (r *Repeater) consumer(ctx context.Context) {
 }
 
 func (r *Repeater) producer(ctx context.Context) {
-	select {
-	case <-ctx.Done():
-		return
-	case batch, ok := <-r.batchesCh:
-		if !ok {
-			return
-		}
-
-		task := cleanupTask{
-			SuccessIDs: make([]int64, len(batch)),
-			RetryIDs:   make([]int64, len(batch)),
-		}
-
-		for i, event := range batch {
-			err := r.sender.Send(ctx, event)
-
-			if err != nil {
-				task.RetryIDs = appendEventIDs(task.RetryIDs, batch[i:]...)
-				break
-			}
-
-			task.SuccessIDs = append(task.SuccessIDs, event.ID)
-		}
-
-		// if len(task.SuccessIDs) == 0 && len(task.RetryIDs) == 0 {
-		// }
-
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case r.tasksCh <- task:
-		}
+		case batch, ok := <-r.batchesCh:
+			if !ok {
+				return
+			}
 
+			task := cleanupTask{
+				SuccessIDs: make([]int64, 0, len(batch)),
+				RetryIDs:   make([]int64, 0, len(batch)),
+			}
+
+			for i, event := range batch {
+				err := r.sender.Send(ctx, event)
+
+				if err != nil {
+					task.RetryIDs = appendEventIDs(task.RetryIDs, batch[i:]...)
+					break
+				}
+
+				task.SuccessIDs = append(task.SuccessIDs, event.ID)
+			}
+
+			if len(task.SuccessIDs) == 0 && len(task.RetryIDs) == 0 {
+				continue
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case r.tasksCh <- task:
+			}
+
+		}
 	}
 }
 
 func (r *Repeater) worker(ctx context.Context) {
-	select {
-	case <-ctx.Done():
-		return
-	case task, ok := <-r.tasksCh:
-		if !ok {
+	for {
+		select {
+		case <-ctx.Done():
 			return
-		}
-
-		for {
-			err := r.handleCleanupTask(ctx, task)
-			if err == nil {
-				break
+		case task, ok := <-r.tasksCh:
+			if !ok {
+				return
 			}
 
-			if !sleepWithContext(ctx, r.cfg.RetryBackoff) {
-				return
+			for {
+				err := r.handleCleanupTask(ctx, task)
+				if err == nil {
+					break
+				}
+
+				if !sleepWithContext(ctx, r.cfg.RetryBackoff) {
+					return
+				}
 			}
 		}
 	}
@@ -189,13 +194,11 @@ func sleepWithContext(ctx context.Context, duration time.Duration) bool {
 }
 
 func appendEventIDs(dst []int64, events ...model.DemoEvent) []int64 {
-	ids := make([]int64, len(events))
-
 	for _, val := range events {
-		ids = append(ids, val.ID)
+		dst = append(dst, val.ID)
 	}
 
-	return ids
+	return dst
 }
 
 func (r *Repeater) handleCleanupTask(ctx context.Context, task cleanupTask) error {
