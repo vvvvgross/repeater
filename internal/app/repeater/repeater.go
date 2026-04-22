@@ -177,15 +177,46 @@ func (r *Repeater) worker(ctx context.Context) {
 }
 
 func sleepWithContext(ctx context.Context, duration time.Duration) bool {
-	return true //
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func appendEventIDs(dst []int64, events ...model.DemoEvent) []int64 {
-	return []int64{}
-	//
+	ids := make([]int64, len(events))
+
+	for _, val := range events {
+		ids = append(ids, val.ID)
+	}
+
+	return ids
 }
 
 func (r *Repeater) handleCleanupTask(ctx context.Context, task cleanupTask) error {
-	return ctx.Err()
-	//
+	retryIDs := make([]int64, len(task.RetryIDs))
+	copy(retryIDs, task.RetryIDs)
+
+	if len(task.SuccessIDs) > 0 {
+		err := r.repo.DeleteBatch(ctx, task.SuccessIDs)
+
+		if err != nil {
+			retryIDs = append(retryIDs, task.SuccessIDs...)
+		}
+	}
+
+	if len(retryIDs) > 0 {
+		err := r.repo.MarkForRetryBatch(ctx, retryIDs)
+
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
